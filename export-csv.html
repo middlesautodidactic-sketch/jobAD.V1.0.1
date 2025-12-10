@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Export CSV - รายงานการออกปฏิบัติงาน (หลายเดือน)</title>
+  <style>
+    body { font-family: sans-serif; padding: 18px; background:#fff; color:#111; }
+    h1 { color:#c00; text-align:left; }
+    .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }
+    label { font-weight:600; margin-right:8px; }
+    input[type="month"] { padding:6px 8px; border:1px solid #ccc; border-radius:6px; }
+    button { background:#c00; color:#fff; border:none; padding:8px 12px; border-radius:8px; cursor:pointer; font-weight:700; }
+    button:disabled { opacity:0.6; cursor:not-allowed; }
+    table { width:100%; border-collapse:collapse; margin-top:14px; }
+    th, td { padding:8px 10px; border:1px solid #e5e5e5; text-align:left; }
+    th { background:#f8f8f8; }
+    .small { font-size:13px; color:#555; }
+    #message { margin-top:12px; color:#555; }
+    .manager-btn{
+      display:inline-block; margin-bottom:15px; margin-right:10px;
+      background:#c00; color:#fff; padding:8px 16px;
+      border-radius:8px; text-decoration:none; font-weight:bold;
+      box-shadow:0 3px 6px rgba(0,0,0,0.15); transition:0.3s;
+    }
+    .manager-btn:hover{ background:#a00; }
+  </style>
+</head>
+<body>
+  <div>
+    <a href="adminV2.html" class="manager-btn">Back to ADMIN</a>
+  </div>
+  <h1>📥 Export CSV — รายงานการออกปฏิบัติงาน (หลายเดือน)</h1>
+
+  <div class="controls">
+    <div>
+      <label for="startMonth">เริ่มเดือน:</label>
+      <input id="startMonth" type="month" />
+    </div>
+    <div>
+      <label for="endMonth">ถึงเดือน:</label>
+      <input id="endMonth" type="month" />
+    </div>
+    <div>
+      <label for="includeZero" class="small">แสดงคนที่ไม่มีรายการด้วย</label>
+      <input id="includeZero" type="checkbox" checked />
+    </div>
+    <div>
+      <button id="loadBtn">โหลดข้อมูล</button>
+    </div>
+    <div>
+      <button id="exportBtn" disabled>⬇️ ดาวน์โหลด CSV</button>
+    </div>
+  </div>
+
+  <div id="message" class="small">เลือกช่วงเดือน แล้วกด "โหลดข้อมูล"</div>
+  <div id="tableWrap"></div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.3.0/firebase-app.js";
+    import { getFirestore, collection, getDocs } from "https://www.gstatic.com/firebasejs/12.3.0/firebase-firestore.js";
+
+    // Firebase Config
+    const firebaseConfig = {
+      apiKey: "AIzaSyAXayBBLVSohNCIsnlWRq6rD0BUbW70MGk",
+      authDomain: "events-666d6.firebaseapp.com",
+      projectId: "events-666d6",
+      storageBucket: "events-666d6.appspot.com",
+      messagingSenderId: "589078390914",
+      appId: "1:589078390914:web:480ce96137ffac835aac9b",
+      measurementId: "G-97GD75S814"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    const startMonth = document.getElementById("startMonth");
+    const endMonth = document.getElementById("endMonth");
+    const includeZeroCheckbox = document.getElementById("includeZero");
+    const loadBtn = document.getElementById("loadBtn");
+    const exportBtn = document.getElementById("exportBtn");
+    const tableWrap = document.getElementById("tableWrap");
+    const message = document.getElementById("message");
+
+    let currentReport = [];
+
+    // ฟังก์ชันทำความสะอาดข้อความ (ลบอักขระพิเศษที่มองไม่เห็น)
+    function cleanText(text) {
+      if (!text) return "";
+      return text
+        .replace(/[\u200B-\u200D\uFEFF]/g, '') // ลบ zero-width characters
+        .replace(/[\u0300-\u036F]/g, '') // ลบ combining diacritical marks
+        .replace(/\u0E4D/g, '\u0E48') // แปลง ่ ที่ผิด
+        .replace(/\u0E34/g, 'ิ') // แปลง ิ ที่อาจผิด
+        .replace(/\u0E38/g, 'ุ') // แปลง ุ ที่อาจผิด
+        .replace(/\s+/g, ' ') // แปลงช่องว่างหลายตัวเป็นตัวเดียว
+        .normalize('NFC') // Normalize Unicode
+        .trim(); // ตัดช่องว่างหน้าหลัง
+    }
+
+    function parseYMD(ymd){
+      if(!ymd) return null;
+      const parts = ymd.split("-");
+      if(parts.length < 3) return null;
+      return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+    }
+
+    function getMonthRange(startStr, endStr){
+      const [sy, sm] = startStr.split("-").map(Number);
+      const [ey, em] = endStr.split("-").map(Number);
+      const start = new Date(sy, sm - 1, 1);
+      const end = new Date(ey, em, 1);
+      return { start, end };
+    }
+
+    loadBtn.addEventListener("click", async ()=>{
+      const sVal = startMonth.value;
+      const eVal = endMonth.value;
+      if(!sVal || !eVal){ alert("กรุณาเลือกช่วงเดือนให้ครบ"); return; }
+
+      const { start, end } = getMonthRange(sVal, eVal);
+      if(start >= end){ alert("ช่วงเดือนไม่ถูกต้อง"); return; }
+
+      loadBtn.disabled = true;
+      exportBtn.disabled = true;
+      tableWrap.innerHTML = "";
+      message.textContent = "กำลังโหลดข้อมูล...";
+
+      try{
+        const eventsSnap = await getDocs(collection(db,"events"));
+        const events = [];
+        eventsSnap.forEach(s => {
+          const d = s.data();
+          d._id = s.id;
+          events.push(d);
+        });
+
+        const workersSnap = await getDocs(collection(db,"workers"));
+        const workers = [];
+        workersSnap.forEach(s => {
+          const name = s.data().name;
+          if(name) workers.push(cleanText(name)); // ทำความสะอาดชื่อ
+        });
+
+        // 🔹 กำหนดสถานะหลักที่ต้องการแสดง (ตามลำดับ)
+        const mainStatuses = ["เรียบร้อย", "ไม่เรียบร้อย", "รออนุมัติ", "อนุมัติ"];
+        
+        // เก็บสถานะอื่นๆ ที่อาจมีเพิ่มเติม
+        const otherStatuses = new Set();
+        events.forEach(ev => {
+          if(ev.status && ev.status.trim() !== "") {
+            const status = ev.status.trim();
+            if(!mainStatuses.includes(status)) {
+              otherStatuses.add(status);
+            }
+          }
+        });
+
+        // รวมสถานะทั้งหมด: สถานะหลัก + สถานะอื่นๆ
+        const statusList = [...mainStatuses, ...Array.from(otherStatuses).sort((a,b) => a.localeCompare(b,"th"))];
+
+        const stats = new Map();
+        const ensureWorker = name => {
+          if(!name) return;
+          if(!stats.has(name)) {
+            const workerStat = { name, total: 0 };
+            statusList.forEach(status => { workerStat[status] = 0; });
+            stats.set(name, workerStat);
+          }
+        };
+
+        // ➕ นับ "จำนวนงานทั้งหมด" และสถานะของแต่ละงาน
+        let totalEventsCount = 0;
+        const totalStatusCount = {};
+        statusList.forEach(status => { totalStatusCount[status] = 0; });
+
+        if(includeZeroCheckbox.checked){
+          workers.forEach(w => ensureWorker(w));
+        }
+
+        for(const ev of events){
+          const startDate = parseYMD(ev.start);
+          if(!startDate) continue;
+          if(startDate >= start && startDate < end){
+
+            // นับงาน 1 ชิ้น
+            totalEventsCount++;
+
+            const workerList = Array.isArray(ev.workers) ? ev.workers : (ev.workers ? [ev.workers] : []);
+            
+            const status = ev.status ? ev.status.trim() : "";
+
+            // ✅ นับสถานะของงานนี้แค่ครั้งเดียว (ไม่ซ้ำตามจำนวนคน)
+            if(status && statusList.includes(status)) {
+              totalStatusCount[status]++;
+            }
+
+            for(const w of workerList){
+              const cleanedWorker = cleanText(w); // ทำความสะอาดชื่อก่อนบันทึก
+              ensureWorker(cleanedWorker);
+              const rec = stats.get(cleanedWorker);
+              rec.total++;
+              if(status && statusList.includes(status)) {
+                rec[status]++;
+              }
+            }
+          }
+        }
+
+        const rows = Array.from(stats.values()).sort((a,b)=> a.name.localeCompare(b.name,"th"));
+        if(rows.length === 0){
+          tableWrap.innerHTML = `<div class="small">ไม่พบข้อมูลในช่วงที่เลือก</div>`;
+          message.textContent = "ไม่มีข้อมูลในช่วงเดือนที่เลือก";
+          return;
+        }
+
+        // รวมผลรวมทุกคน
+        const totalSum = { total: totalEventsCount }; // ✅ นับจำนวนงาน ไม่ใช่นับจำนวนครั้ง
+        statusList.forEach(status => { 
+          totalSum[status] = totalStatusCount[status]; // ✅ ใช้ค่าที่นับจากงานโดยตรง
+        });
+
+        // สร้างตาราง HTML
+        let html = `<div style="font-size:16px;margin-bottom:10px;">
+                      🔢 <b>จำนวนงานทั้งหมดในช่วงที่เลือก: ${totalEventsCount} งาน</b>
+                    </div>`;
+
+        html += `<table><thead><tr>
+          <th>ชื่อผู้ปฏิบัติงาน</th>
+          <th>จำนวนครั้งทั้งหมด</th>
+          <th>เรียบร้อย</th>
+          <th>ไม่เรียบร้อย</th>
+          <th>รออนุมัติ</th>
+          <th>อนุมัติ</th>
+        </tr></thead><tbody>`;
+
+        rows.forEach(r=>{
+          html += `<tr>
+            <td>${r.name}</td>
+            <td>${r.total}</td>
+            <td>${r["เรียบร้อย"] || 0}</td>
+            <td>${r["ไม่เรียบร้อย"] || 0}</td>
+            <td>${r["รออนุมัติ"] || 0}</td>
+            <td>${r["อนุมัติ"] || 0}</td>
+          </tr>`;
+        });
+
+        html += `</tbody></table>`;
+
+        // สรุปผลรายบุคคล
+        html += `<h3 style="margin-top:30px;color:#c00;">📊 สรุปผลรวมรายบุคคล</h3>`;
+        html += `<ul>`;
+        rows.forEach(r=>{
+          let details = statusList.map(s => `${s} ${r[s]}`).join(", ");
+          html += `<li><b>${r.name}</b>: รวม ${r.total} ครั้ง (${details})</li>`;
+        });
+        html += `</ul>`;
+
+        tableWrap.innerHTML = html;
+        message.textContent = `สรุปผลรวมช่วง ${sVal} ถึง ${eVal}`;
+
+        exportBtn.disabled = false;
+        currentReport = { rows, totalSum, totalEventsCount, sVal, eVal, statusList };
+
+      }catch(err){
+        console.error(err);
+        alert("เกิดข้อผิดพลาดในการโหลดข้อมูล");
+      }finally{
+        loadBtn.disabled = false;
+      }
+    });
+
+    // Export CSV
+    exportBtn.addEventListener("click", ()=>{
+      if(!currentReport?.rows?.length) return alert("ไม่มีข้อมูลให้ export");
+
+      const { rows, totalSum, totalEventsCount, sVal, eVal, statusList } = currentReport;
+
+      // สร้าง header พร้อมสถานะหลัก 4 ตัว (ไม่มีคอลัมน์รวม)
+      const header = ["ช่วงเดือน","ชื่อผู้ปฏิบัติงาน","จำนวนครั้งทั้งหมด","เรียบร้อย","ไม่เรียบร้อย","รออนุมัติ","อนุมัติ"];
+      
+      const lines = [header.join(",")];
+
+      rows.forEach(r=>{
+        const row = [
+          `"${sVal} ถึง ${eVal}"`,
+          `"${cleanText(r.name)}"`, // ทำความสะอาดชื่อก่อน export
+          r.total,
+          r["เรียบร้อย"] || 0,
+          r["ไม่เรียบร้อย"] || 0,
+          r["รออนุมัติ"] || 0,
+          r["อนุมัติ"] || 0
+        ];
+        lines.push(row.join(","));
+      });
+
+      // แถวรวมทั้งหมด
+      const totalRow = [
+        "\"รวมทั้งหมด\"",
+        "",
+        totalSum.total,
+        totalSum["เรียบร้อย"] || 0,
+        totalSum["ไม่เรียบร้อย"] || 0,
+        totalSum["รออนุมัติ"] || 0,
+        totalSum["อนุมัติ"] || 0
+      ];
+      lines.push(totalRow.join(","));
+
+      // ช่องว่าง
+      lines.push("");
+      lines.push(`จำนวนงานทั้งหมด (นับตามจำนวน event),${totalEventsCount}`);
+      lines.push("");
+
+      lines.push("📈 สรุปผลรวมทั้งหมด");
+      lines.push(`ช่วงเดือน,"${sVal} ถึง ${eVal}"`);
+      lines.push(`จำนวนงานทั้งหมด,${totalSum.total}`);
+      lines.push(`เรียบร้อย,${totalSum["เรียบร้อย"] || 0}`);
+      lines.push(`ไม่เรียบร้อย,${totalSum["ไม่เรียบร้อย"] || 0}`);
+      lines.push(`รออนุมัติ,${totalSum["รออนุมัติ"] || 0}`);
+      lines.push(`อนุมัติ,${totalSum["อนุมัติ"] || 0}`);
+
+      const csv = "\uFEFF" + lines.join("\n");
+      const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `รายงานปฏิบัติงาน-${sVal}_ถึง_${eVal}.csv`;
+      a.click();
+
+      URL.revokeObjectURL(url);
+    });
+
+  </script>
+</body>
+</html>
